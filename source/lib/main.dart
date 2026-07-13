@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'dart:math' as math;
 import 'dart:convert';
 import 'dart:typed_data';
@@ -194,6 +195,7 @@ enum AppScreen {
 
 class FuzzyResult {
   final double score;
+  final bool invalidInput;
   final bool noRulesActive;
   final Map<int, double> ruleStrengths;
   final double stableStrength;
@@ -203,6 +205,7 @@ class FuzzyResult {
 
   const FuzzyResult({
     required this.score,
+    required this.invalidInput,
     required this.noRulesActive,
     required this.ruleStrengths,
     required this.stableStrength,
@@ -284,6 +287,7 @@ double _min6(double a, double b, double c, double d, double e, double f) {
 FuzzyResult _invalidFuzzyResult(String message) {
   return FuzzyResult(
     score: 0.0,
+    invalidInput: true,
     noRulesActive: true,
     ruleStrengths: const {},
     stableStrength: 0.0,
@@ -292,6 +296,25 @@ FuzzyResult _invalidFuzzyResult(String message) {
     recommendation: message,
   );
 }
+
+// Operational input limits for the manual prototype sliders. These limits
+// reject impossible/extreme entries before Mamdani evaluation; they are not
+// additional fuzzy membership coordinates.
+const double _minInputTemp = 20.0;
+const double _maxInputTemp = 35.0;
+const double _minInputPh = 4.0;
+const double _maxInputPh = 10.0;
+const double _minInputDo = 2.0;
+const double _maxInputDo = 10.0;
+const double _minInputAmmonia = 0.0;
+const double _maxInputAmmonia = 5.0;
+
+final TextInputFormatter _decimalInputFormatter =
+    TextInputFormatter.withFunction((oldValue, newValue) {
+      return RegExp(r'^\d{0,4}(\.\d{0,2})?$').hasMatch(newValue.text)
+          ? newValue
+          : oldValue;
+    });
 
 FuzzyResult calculateFuzzyRisk(
   double temp,
@@ -305,8 +328,15 @@ FuzzyResult calculateFuzzyRisk(
   if (!temp.isFinite || !ph.isFinite || !doLevel.isFinite) {
     return _invalidFuzzyResult('Bacaan sensor tidak sah. Sila semak input.');
   }
-  if (temp < 0.0 || temp > 100.0 || ph < 0.0 || ph > 14.0 || doLevel < 0.0 || doLevel > 20.0) {
-    return _invalidFuzzyResult('Bacaan di luar julat sah. Sila semak input.');
+  if (temp < _minInputTemp ||
+      temp > _maxInputTemp ||
+      ph < _minInputPh ||
+      ph > _maxInputPh ||
+      doLevel < _minInputDo ||
+      doLevel > _maxInputDo) {
+    return _invalidFuzzyResult(
+      'Julat sah prototaip: suhu 20–35 °C, pH 4.0–10.0 dan DO 2–10 mg/L.',
+    );
   }
   if (!const ['Sunny', 'Cloudy', 'Rainy', 'Stormy'].contains(weather) ||
       !const ['Active Flow', 'Slack Tide', 'Not Applicable'].contains(tide) ||
@@ -408,6 +438,7 @@ FuzzyResult calculateFuzzyRisk(
   if (denominator == 0.0) {
     return FuzzyResult(
       score: 0.0,
+      invalidInput: false,
       noRulesActive: true,
       ruleStrengths: rules,
       stableStrength: 0.0,
@@ -432,6 +463,7 @@ FuzzyResult calculateFuzzyRisk(
 
   return FuzzyResult(
     score: numerator / denominator,
+    invalidInput: false,
     noRulesActive: false,
     ruleStrengths: rules,
     stableStrength: wStable,
@@ -645,7 +677,9 @@ class _MainNavigationControllerState extends State<MainNavigationController> {
       systemType,
     );
 
-    final status = result.noRulesActive
+    final status = result.invalidInput
+        ? 'INPUT TIDAK SAH'
+        : result.noRulesActive
         ? 'TIADA ALERTI AKTIF'
         : result.score >= 75.0
         ? 'KRITIKAL: Kualiti Air Buruk'
@@ -829,7 +863,7 @@ class _MainNavigationControllerState extends State<MainNavigationController> {
       'ph_lbl':
           'Tahap pH', // salinity_lbl Keasinan (ppt) -> ph_lbl Tahap pH [1]
       'do_lbl': 'Oksigen Terlarut (mg/L)',
-      'ammonia_lbl': 'Ammonia (ppm)',
+      'ammonia_lbl': 'Ammonia log (ppm)',
     };
     return dictionary[key] ?? key;
   }
@@ -967,6 +1001,14 @@ class _MainNavigationControllerState extends State<MainNavigationController> {
   }
 
   bool _validateSystemInputs() {
+    if (!const ['Kolam', 'Tangki', 'Sangkar'].contains(systemType)) {
+      _showErrorSnackBar('Sila pilih jenis sistem akuakultur yang sah.');
+      return false;
+    }
+    if (!const ['Bulat', 'Segi Empat'].contains(shapeType)) {
+      _showErrorSnackBar('Sila pilih bentuk sistem yang sah.');
+      return false;
+    }
     if (_systemNameCtrl.text.trim().isEmpty) {
       _showErrorSnackBar('Sila masukkan nama sistem yang sah.');
       return false;
@@ -975,23 +1017,61 @@ class _MainNavigationControllerState extends State<MainNavigationController> {
       _showErrorSnackBar('Sila pilih jenis ternakan.');
       return false;
     }
-    if (_speciesNameCtrl.text.trim().isEmpty) {
-      _showErrorSnackBar('Sila masukkan nama spesies yang sah.');
+    final speciesName = _speciesNameCtrl.text.trim().toLowerCase();
+    const validSpecies = <String, Set<String>>{
+      'Ikan': {
+        'tilapia',
+        'patin',
+        'keli',
+        'siakap',
+        'kap',
+        'jelawat',
+        'haruan',
+        'kerapu',
+      },
+      'Udang': {'udang putih', 'vannamei', 'udang galah', 'udang harimau'},
+      'Ketam': {'ketam nipah', 'ketam bunga', 'ketam bakau'},
+    };
+    if (speciesName.isEmpty ||
+        !(validSpecies[speciesType]?.contains(speciesName) ?? false)) {
+      final examples = validSpecies[speciesType]?.join(', ') ?? '';
+      _showErrorSnackBar(
+        'Nama spesies tidak sepadan dengan jenis ternakan. Pilihan sah: $examples.',
+      );
       return false;
     }
     final quantity = int.tryParse(_quantityCtrl.text.trim());
-    if (quantity == null || quantity <= 0) {
-      _showErrorSnackBar('Bilangan individu mesti nombor bulat melebihi 0.');
+    if (quantity == null || quantity <= 0 || quantity > 1000000) {
+      _showErrorSnackBar(
+        'Bilangan individu mesti nombor bulat antara 1 hingga 1,000,000.',
+      );
       return false;
     }
     if (culturePhase == null || culturePhase!.isEmpty) {
       _showErrorSnackBar('Sila pilih fasa kultur.');
       return false;
     }
-    if (!lengthValue.isFinite || lengthValue <= 0.0 ||
-        !widthValue.isFinite || widthValue <= 0.0 ||
-        !depthValue.isFinite || depthValue <= 0.0) {
-      _showErrorSnackBar('Semua ukuran mesti nombor sah melebihi 0.');
+    final dimensionMin = systemType == 'Tangki' ? 0.5 : 1.0;
+    final dimensionMax = systemType == 'Kolam'
+        ? 500.0
+        : (systemType == 'Sangkar' ? 100.0 : 30.0);
+    final depthMin = systemType == 'Tangki'
+        ? 0.3
+        : (systemType == 'Sangkar' ? 1.0 : 0.5);
+    final depthMax = systemType == 'Sangkar' ? 30.0 : 5.0;
+
+    if (!lengthValue.isFinite ||
+        !widthValue.isFinite ||
+        !depthValue.isFinite ||
+        lengthValue < dimensionMin ||
+        lengthValue > dimensionMax ||
+        widthValue < dimensionMin ||
+        widthValue > dimensionMax ||
+        depthValue < depthMin ||
+        depthValue > depthMax) {
+      _showErrorSnackBar(
+        '$systemType: ukuran sisi/diameter mesti ${dimensionMin.toStringAsFixed(1)}–${dimensionMax.toStringAsFixed(0)} m dan kedalaman ${depthMin.toStringAsFixed(1)}–${depthMax.toStringAsFixed(0)} m.',
+      );
       return false;
     }
     return true;
@@ -2097,6 +2177,7 @@ class _MainNavigationControllerState extends State<MainNavigationController> {
                       child: TextFormField(
                         controller: _panjangCtrl,
                         keyboardType: TextInputType.number,
+                        inputFormatters: [_decimalInputFormatter],
                         style: TextStyle(
                           color: isDarkMode ? Colors.white : Colors.black87,
                         ),
@@ -2114,6 +2195,7 @@ class _MainNavigationControllerState extends State<MainNavigationController> {
                       child: TextFormField(
                         controller: _lebarCtrl,
                         keyboardType: TextInputType.number,
+                        inputFormatters: [_decimalInputFormatter],
                         style: TextStyle(
                           color: isDarkMode ? Colors.white : Colors.black87,
                         ),
@@ -2132,6 +2214,7 @@ class _MainNavigationControllerState extends State<MainNavigationController> {
                       child: TextFormField(
                         controller: _diameterCtrl, // 🌟 PASTIKAN BARIS INI ADA
                         keyboardType: TextInputType.number,
+                        inputFormatters: [_decimalInputFormatter],
                         style: TextStyle(
                           color: isDarkMode ? Colors.white : Colors.black87,
                         ),
@@ -2153,6 +2236,7 @@ class _MainNavigationControllerState extends State<MainNavigationController> {
                     child: TextFormField(
                       controller: _kedalamanCtrl, // 🌟 PASTIKAN BARIS INI ADA
                       keyboardType: TextInputType.number,
+                      inputFormatters: [_decimalInputFormatter],
                       style: TextStyle(
                         color: isDarkMode ? Colors.white : Colors.black87,
                       ),
@@ -2196,6 +2280,9 @@ class _MainNavigationControllerState extends State<MainNavigationController> {
               const SizedBox(height: 16),
               TextField(
                 controller: _speciesNameCtrl,
+                inputFormatters: [
+                  FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z ]')),
+                ],
                 style: TextStyle(
                   color: isDarkMode ? Colors.white : Colors.black87,
                 ),
@@ -2213,6 +2300,7 @@ class _MainNavigationControllerState extends State<MainNavigationController> {
               TextField(
                 controller: _quantityCtrl,
                 keyboardType: TextInputType.number,
+                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
                 style: TextStyle(
                   color: isDarkMode ? Colors.white : Colors.black87,
                 ),
@@ -2472,14 +2560,23 @@ class _MainNavigationControllerState extends State<MainNavigationController> {
     }
     final activeSystem = registeredSystems[selectedSystemIndex];
 
-    final fuzzyResult = calculateFuzzyRisk(
-      tempSensor,
-      phSensor,
-      doSensor,
-      manualWeather,
-      manualTide,
-      activeSystem.type,
-    );
+    final ammoniaValue = double.tryParse(_ammoniaCtrl.text.trim());
+    final ammoniaIsValid = ammoniaValue != null &&
+        ammoniaValue.isFinite &&
+        ammoniaValue >= _minInputAmmonia &&
+        ammoniaValue <= _maxInputAmmonia;
+    final fuzzyResult = ammoniaIsValid
+        ? calculateFuzzyRisk(
+            tempSensor,
+            phSensor,
+            doSensor,
+            manualWeather,
+            manualTide,
+            activeSystem.type,
+          )
+        : _invalidFuzzyResult(
+            'Ammonia mesti nombor antara 0.00–5.00 ppm. Parameter ini untuk log sahaja dan bukan antecedent Mamdani Bab 3.',
+          );
     final fuzzyRisk = fuzzyResult.score;
 
     String finalStatus = '';
@@ -2491,8 +2588,14 @@ class _MainNavigationControllerState extends State<MainNavigationController> {
         : const Color(0xFF0A5C66);
 
     // Status classification dan fallback Bab 3.
-    if (fuzzyResult.noRulesActive) {
-      finalStatus = 'TIADA ALERTI AKTIF';
+    if (fuzzyResult.invalidInput) {
+      finalStatus = 'INPUT TIDAK SAH';
+      cause = fuzzyResult.recommendation;
+      impact = 'Pengiraan Mamdani dihentikan; tiada status Optimal diberikan.';
+      actionStep = 'Betulkan nilai input sebelum menyimpan pembacaan.';
+      statusColor = Colors.red.shade800;
+    } else if (fuzzyResult.noRulesActive) {
+      finalStatus = 'SEMAK INPUT: TIADA RULE AKTIF';
       cause = 'Tiada rule fuzzy diaktifkan untuk kombinasi input ini.';
       impact = 'Sistem memaparkan fallback selamat 0% tanpa mereka skor.';
       actionStep = fuzzyResult.recommendation;
@@ -2626,16 +2729,16 @@ class _MainNavigationControllerState extends State<MainNavigationController> {
                 _buildSliderControl(
                   _t('temp_lbl'),
                   tempSensor,
-                  20.0,
-                  35.0,
+                  _minInputTemp,
+                  _maxInputTemp,
                   (val) => setState(() => tempSensor = val),
                   ' °C',
                 ),
                 _buildSliderControl(
                   _t('ph_lbl'), // Mapped to pH level translation [1]
                   phSensor, // state variable phSensor replaces salinitySensor [1]
-                  0.0,
-                  14.0, // Scale range strictly 0 to 14 [1]
+                  _minInputPh,
+                  _maxInputPh,
                   (val) => setState(() => phSensor = val),
                   '', // ppt completely removed [1]
                   isInt: false, // Double slider for highly-precise pH [1]
@@ -2643,8 +2746,8 @@ class _MainNavigationControllerState extends State<MainNavigationController> {
                 _buildSliderControl(
                   _t('do_lbl'),
                   doSensor,
-                  2.0,
-                  10.0,
+                  _minInputDo,
+                  _maxInputDo,
                   (val) => setState(() => doSensor = val),
                   ' mg/L',
                 ),
@@ -2884,6 +2987,10 @@ class _MainNavigationControllerState extends State<MainNavigationController> {
                         ? const Color(0xFFD86600) // Oren gelap
                         : finalStatus.contains('KRITIKAL')
                         ? const Color(0xFFB71C1C) // Merah gelap untuk kritikal
+                        : finalStatus.contains('INPUT TIDAK SAH')
+                        ? const Color(0xFF6A1B1A)
+                        : finalStatus.contains('TIADA RULE')
+                        ? const Color(0xFF374151)
                         : (isDarkMode ? const Color(0xFF111827) : Colors.white),
                     borderRadius: BorderRadius.circular(12),
                     border: Border.all(
@@ -2893,6 +3000,10 @@ class _MainNavigationControllerState extends State<MainNavigationController> {
                           ? const Color(0xFFB35300)
                           : finalStatus.contains('KRITIKAL')
                           ? const Color(0xFF9E1B1B)
+                          : finalStatus.contains('INPUT TIDAK SAH')
+                          ? const Color(0xFF4E1212)
+                          : finalStatus.contains('TIADA RULE')
+                          ? const Color(0xFF1F2937)
                           : (isDarkMode
                                 ? Colors.white.withOpacity(0.05)
                                 : Colors.black.withOpacity(0.04)),
@@ -2951,12 +3062,16 @@ class _MainNavigationControllerState extends State<MainNavigationController> {
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      '${fuzzyRisk.toStringAsFixed(1)}%',
+                      fuzzyResult.invalidInput
+                          ? '—'
+                          : '${fuzzyRisk.toStringAsFixed(1)}%',
                       style: TextStyle(
                         fontSize: 28,
                         fontWeight: FontWeight.bold,
                         color: fuzzyResult.noRulesActive
-                            ? Colors.grey
+                            ? (fuzzyResult.invalidInput
+                                  ? Colors.red.shade700
+                                  : Colors.grey)
                             : _getRiskColor(fuzzyRisk),
                       ),
                     ),
@@ -2969,7 +3084,9 @@ class _MainNavigationControllerState extends State<MainNavigationController> {
                     value: fuzzyRisk / 100.0,
                     strokeWidth: 6,
                     color: fuzzyResult.noRulesActive
-                        ? Colors.grey
+                        ? (fuzzyResult.invalidInput
+                              ? Colors.red.shade700
+                              : Colors.grey)
                         : _getRiskColor(fuzzyRisk),
                     backgroundColor: Colors.black.withOpacity(0.05),
                   ),
@@ -2982,9 +3099,13 @@ class _MainNavigationControllerState extends State<MainNavigationController> {
           ElevatedButton.icon(
             onPressed: () {
               final ammonia = double.tryParse(_ammoniaCtrl.text.trim());
-              if (ammonia == null || !ammonia.isFinite || ammonia < 0.0) {
+              if (fuzzyResult.invalidInput ||
+                  ammonia == null ||
+                  !ammonia.isFinite ||
+                  ammonia < _minInputAmmonia ||
+                  ammonia > _maxInputAmmonia) {
                 _showErrorSnackBar(
-                  'Bacaan ammonia mesti nombor sah yang tidak negatif.',
+                  fuzzyResult.recommendation,
                 );
                 return;
               }
@@ -3288,10 +3409,12 @@ class _MainNavigationControllerState extends State<MainNavigationController> {
           ),
         ),
         SizedBox(
-          width: 80,
+          width: 130,
           child: TextFormField(
             controller: _ammoniaCtrl,
             keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            inputFormatters: [_decimalInputFormatter],
+            onChanged: (_) => setState(() {}),
             style: TextStyle(
               fontSize: 12,
               fontWeight: FontWeight.bold,
@@ -3301,6 +3424,7 @@ class _MainNavigationControllerState extends State<MainNavigationController> {
             ),
             textAlign: TextAlign.end,
             decoration: InputDecoration(
+              helperText: '0.00–5.00; bukan FIS',
               contentPadding: const EdgeInsets.symmetric(
                 vertical: 4,
                 horizontal: 8,

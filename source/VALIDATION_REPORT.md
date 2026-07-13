@@ -28,6 +28,24 @@ tuned to reproduce them.
 - Conventional Tank scores are identical for Active Flow, Slack Tide, and N/A.
 - Repeated identical inputs return identical results.
 
+## Input validation added after supervisor stress test
+
+- Manual water-quality inputs are limited to temperature 20–35°C, pH 4.0–10.0,
+  and DO 2–10 mg/L. Entries outside these operational slider ranges display
+  `INPUT TIDAK SAH`; no Optimal status or invented risk score is shown.
+- Ammonia is explicitly labelled as a log-only field because it is not an
+  antecedent in the Chapter 3 Mamdani model. Its prototype entry range is
+  limited to 0–5 ppm; an out-of-range value blocks calculation and saving.
+- Numeric-only formatters and system-specific dimension checks reject
+  unrealistic farm configurations before the dashboard opens.
+- Initial dimension assumptions: Pond side/diameter 1–500 m and depth 0.5–5 m;
+  Cage side/diameter 1–100 m and depth 1–30 m; Conventional Tank
+  side/diameter 0.5–30 m and depth 0.3–5 m.
+- Species names are checked against a small prototype aquaculture whitelist
+  consistent with the selected animal category. These setup limits are
+  implementation assumptions because Chapter 3 does not prescribe exact farm
+  dimension or species-entry boundaries.
+
 ## Implementation assumptions
 
 - Exact outer coordinates absent from Chapter 3 use initial values derived from
